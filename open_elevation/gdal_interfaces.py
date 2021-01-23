@@ -15,9 +15,10 @@ from lazy import lazy
 
 from tqdm import tqdm
 
-import open_elevation.polygon_index as polygon_index
-import open_elevation.nrw_las as nrw_las
 import open_elevation.utils as utils
+import open_elevation.nrw_las as nrw_las
+import open_elevation.celery_tasks.app as app
+import open_elevation.polygon_index as polygon_index
 
 from open_elevation.results_lrucache \
     import ResultFiles_LRUCache
@@ -28,6 +29,24 @@ def _polygon_from_box(box):
             (box[3],box[0]),
             (box[3],box[2]),
             (box[1],box[2])]
+
+
+def _subset_filter_how(x, data_re, stat):
+    data_re = re.compile(data_re)
+
+    if 'stat' not in x and \
+       not data_re.match(x['file']):
+        return False
+
+    if 'stat' in x and \
+       not data_re.match(x['las_meta']):
+        return False
+
+    if 'stat' in x and \
+       stat != x['stat']:
+        return False
+
+    return True
 
 
 def in_directory(fn, paths):
@@ -55,7 +74,7 @@ def choose_highest_resolution(nearest):
 
 # Originally based on https://stackoverflow.com/questions/13439357/extract-point-from-raster-in-gdal
 class GDALInterface(object):
-    SEA_LEVEL = 0
+    SEA_LEVEL = -9999
     def __init__(self, path):
         super(GDALInterface, self).__init__()
         self.path = path
@@ -142,39 +161,35 @@ class GDALInterface(object):
               .GetStatistics(True, True))
 
 
-    def _get_pixel(self, lat, lon):
-        # get coordinate of the raster
-        xgeo, ygeo, zgeo = self._coordinate_transform\
-                               .TransformPoint(lon, lat, 0)
-
-        # convert it to pixel/line on band
-        u = xgeo - self.geo_transform_inv[0]
-        v = ygeo - self.geo_transform_inv[3]
-        # FIXME this int() is probably bad idea, there should be half cell size thing needed
-        xpix = int(self.geo_transform_inv[1] * u + \
-                   self.geo_transform_inv[2] * v)
-        ylin = int(self.geo_transform_inv[4] * u + \
-                   self.geo_transform_inv[5] * v)
-
-        return ylin, xpix
+    def _get_pixels(self, points):
+        data = self._coordinate_transform\
+                   .TransformPoints(points)
+        data = [(u - self.geo_transform_inv[0],
+                 v - self.geo_transform_inv[3])
+                for u,v,_ in data]
+        data = [(int(self.geo_transform_inv[4] * u +\
+                     self.geo_transform_inv[5] * v),
+                 int(self.geo_transform_inv[1] * u + \
+                     self.geo_transform_inv[2] * v)) \
+                for u,v in data]
+        return data
 
 
-    def lookup(self, lat, lon):
-        try:
-            ylin, xpix = self._get_pixel(lat = lat, lon = lon)
+    def lookup(self, points):
+        points = self._get_pixels(points)
+        res = []
+        for y,x in points:
+            if 0 <= y < self.src.RasterYSize \
+               and 0 <= x < self.src.RasterXSize:
+                res += [self.points_array[y,x]]
+            else:
+                res += [self.SEA_LEVEL]
 
-            # look the value up
-            v = self.points_array[ylin, xpix]
+        return res
 
-            return v if v > -5000 else self.SEA_LEVEL
-        except Exception as e:
-            logging.error("""
-            cannot lookup coordinate!
-            lon = %f
-            lat = %f
-            error: %s
-            """ % (lon, lat, str(e)))
-            return self.SEA_LEVEL
+
+    def lookup_one(self, lat, lon):
+        return self.lookup([lon, lat])[0]
 
 
     def close(self):
@@ -286,20 +301,8 @@ class GDALTileInterface(object):
             self._las_dirs[dn] = nrw_las.NRWData(path = dn)
 
 
-    def print_used_las_space(self):
-        res = []
-        for path, las in self._las_dirs.items():
-            res += [("Size of cache in %s = %s GB)" %
-                     (path,las._cache.size()/(1024**3)))]
-        return '\n'.join(res)
-
-
     def open_gdal_interface(self, path):
         if path not in self._interfaces:
-            las_path = in_directory(path, self._las_dirs.keys())
-            if las_path:
-                path = self._las_dirs[las_path].get_path(path)
-
             with self._interfaces_lock:
                 self._interfaces[path] = GDALInterface(path)
 
@@ -346,35 +349,21 @@ class GDALTileInterface(object):
         return res
 
 
-    def lookup(self, lat, lon, data_re):
-        nearest = list(self._index.nearest((lon, lat)))
-
-        if data_re:
-            data_re = re.compile(data_re)
-            nearest = [x for x in nearest \
-                       if data_re.match(x['file'])]
-
-        coords = choose_highest_resolution(nearest)
-        gdal_interface = self.open_gdal_interface\
-            (coords['file'])
-        return {'elevation': float(gdal_interface.lookup(lat, lon)),
-                'resolution': coords['resolution']}
-
-
-    def subset(self, box, data_re):
-        cache = ResultFiles_LRUCache\
-            (os.path.join(self.path, '_subset_cache'),
-             maxsize = 0.5)
-        key = ('gdal_interface_subset',box, data_re)
-        if key in cache:
-            return cache.get(key)
-
+    @app.cache_fn_results(keys = ['box','data_re','stat'])
+    def subset(self, box, data_re, stat):
         index = self._index.intersect\
-            (regex = data_re,
-             polygon = _polygon_from_box(box))
-        fn = cache.add(key)
-        index.save(fn)
-        return fn
+            (polygon = _polygon_from_box(box))
+        index = index.filter\
+            (how = lambda x:
+             _subset_filter_how(x, data_re, stat))
+
+        ofn = utils.get_tempfile()
+        try:
+            index.save(ofn)
+        except Exception as e:
+            utils.remove_file(ofn)
+            raise e
+        return ofn
 
 
     def _build_index(self):

@@ -28,7 +28,7 @@ class Files_LRUCache:
             (directory = path + '_deque')
         self._sizes = diskcache.Cache\
             (directory = path + '_cache',
-             size_limit = 100*(1024**2))
+             size_limit = (1024**3))
         self._lock = diskcache.RLock(self._sizes, '_lock')
 
         with self._lock:
@@ -64,6 +64,7 @@ class Files_LRUCache:
     def _update_sizes(self, item):
         if not os.path.exists(item):
             if self._remove_from_sizes(item):
+                # here only if something was deleted from _sizes
                 self._deque.remove(item)
             return
 
@@ -150,7 +151,7 @@ class Files_LRUCache:
                 pass
 
             self._remove_from_sizes(item)
-            logging.info("""
+            logging.debug("""
             file is removed from cache: {}
             Files_LRUCache size: {:.5f} GB
             Files_LRUCache usage: {:.2%}
