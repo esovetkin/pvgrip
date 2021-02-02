@@ -39,7 +39,7 @@ def _subset_filter_how(x, data_re, stat):
         return False
 
     if 'stat' in x and \
-       not data_re.match(x['las_meta']):
+       not data_re.match(x['remote_meta']):
         return False
 
     if 'stat' in x and \
@@ -152,8 +152,14 @@ class GDALInterface(object):
 
     @lazy
     def points_array(self):
-        b = self.src.GetRasterBand(1)
-        return b.ReadAsArray()
+        res = self.src.ReadAsArray()
+        if 3 == len(res.shape):
+            return np.transpose(res, axes = (1,2,0))
+
+        if 2 == len(res.shape):
+            res = np.expand_dims(res, axis = 2)
+
+        return res
 
 
     def print_statistics(self):
@@ -183,7 +189,7 @@ class GDALInterface(object):
                and 0 <= x < self.src.RasterXSize:
                 res += [self.points_array[y,x]]
             else:
-                res += [self.SEA_LEVEL]
+                res += [self.SEA_LEVEL*np.ones((self.src.RasterCount,))]
 
         return res
 
@@ -264,7 +270,7 @@ class GDALTileInterface(object):
         path = os.path.commonprefix\
             ([x for x in self._index.files()
               if x is not None] + \
-             [x for x in self._index.files(what = 'las_meta')
+             [x for x in self._index.files(what = 'remote_meta')
               if x is not None])
         self._find_las_dirs(path)
 
@@ -296,7 +302,7 @@ class GDALTileInterface(object):
     def _find_las_dirs(self, path):
         for fn in utils.list_files\
             (path = path,
-             regex = '.*/las_meta\.json$'):
+             regex = '.*/remote_meta\.json$'):
             dn = os.path.abspath(os.path.dirname(fn))
             self._las_dirs[dn] = nrw_las.NRWData(path = dn)
 
@@ -350,12 +356,17 @@ class GDALTileInterface(object):
 
 
     @app.cache_fn_results(keys = ['box','data_re','stat'])
-    def subset(self, box, data_re, stat):
+    def subset(self, box, data_re, stat,
+               raise_on_empty = True):
         index = self._index.intersect\
             (polygon = _polygon_from_box(box))
         index = index.filter\
             (how = lambda x:
              _subset_filter_how(x, data_re, stat))
+
+        if raise_on_empty and 0 == index.size():
+            raise RuntimeError\
+                ("no data available for the selected location")
 
         ofn = utils.get_tempfile()
         try:

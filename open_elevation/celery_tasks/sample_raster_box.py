@@ -14,6 +14,8 @@ import open_elevation.celery_tasks.app \
     as app
 import open_elevation.celery_tasks.save_geotiff \
     as save_geotiff
+import open_elevation.celery_tasks.save_png \
+    as save_png
 import open_elevation.celery_tasks.save_hillshade \
     as save_hillshade
 import open_elevation.celery_tasks.las_processing \
@@ -51,12 +53,13 @@ def check_all_data_available(index_fn):
         if os.path.exists(x['file']):
             continue
 
-        if 'las_meta' in x:
+        if 'remote_meta' in x:
             tasks += [las_processing.process_laz\
                       (url = x['url'],
                        ofn = x['file'],
                        resolution = x['pdal_resolution'],
-                       what = x['stat'])]
+                       what = x['stat'],
+                       if_compute_las = x['if_compute_las'])]
     return celery.group(tasks)
 
 
@@ -96,11 +99,17 @@ def sample_from_box(index_fn, box,
             res = x
             continue
 
+        if x.shape != res.shape:
+            raise RuntimeError\
+                ("cannot join data sources of different shape")
+
         res = np.array((res,x)).max(axis=0)
     res = np.array(res).reshape(len(grid['mesh'][0]),
-                                len(grid['mesh'][1]))
-    res = np.transpose(res)[::-1,]
+                                len(grid['mesh'][1]),
+                                res.shape[1])
     res = fill_missing(res)
+    res = np.transpose(np.flip(res, axis = 1),
+                       axes=(1,0,2))
 
     ofn = utils.get_tempfile()
     try:
@@ -115,7 +124,8 @@ def sample_from_box(index_fn, box,
 def sample_raster(gdal, box, data_re, stat,
                   mesh_type, step, output_type,
                   max_points = 2e+7):
-    if output_type not in ('geotiff', 'pickle', 'pnghillshade'):
+    if output_type not in ('geotiff', 'pickle',
+                           'pnghillshade','png'):
         raise RuntimeError("Invalid 'output_type' argument!")
 
     grid = _compute_mesh(box = box, step = step,
@@ -135,6 +145,10 @@ def sample_raster(gdal, box, data_re, stat,
          (kwargs = {'index_fn': index_fn, 'box': box,
                     'mesh_type': mesh_type, 'step': step},
           immutable = True))
+
+    if output_type in ('png'):
+        tasks |= save_png.save_png.signature()
+        return tasks
 
     if output_type in ('geotiff', 'pnghillshade'):
         tasks |= save_geotiff.save_geotiff.signature()
