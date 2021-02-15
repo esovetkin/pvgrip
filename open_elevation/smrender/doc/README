@@ -1,4 +1,0 @@
-To create PDF documentation run `pdflatex smrender` twice.
-
-To create HTML run `tth smrender`.
-

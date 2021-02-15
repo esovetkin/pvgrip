@@ -4,12 +4,14 @@ RUN apt-get update -y
 RUN apt-get install -y \
     python3-pip libspatialindex-dev \
     bc pdal \
-    redis git
+    redis git \
+    librsvg2-dev libtool
 
 RUN mkdir /code
 ADD . /code/
 WORKDIR /code
 
+RUN scripts/install_smrender.sh
 RUN pip3 install -r requirements.txt
 RUN pip3 install -e .
 
