@@ -12,6 +12,8 @@ ADD . /code/
 WORKDIR /code
 
 RUN scripts/install_smrender.sh
+RUN apt-get update -y
+RUN apt-get install osmctools -y
 RUN pip3 install -r requirements.txt
 RUN pip3 install -e .
 
